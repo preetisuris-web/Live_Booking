@@ -1,1 +1,203 @@
-const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ2NbLbqLhidQA7sUuotUIglccxXTbEqnY64o8_qD2ACNFJ19f7QbwmB0xQL6DELAkms-8HGbqjt8mn/pub?output=csv";
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+<title>Suri's Booking Demo</title>
+<style>
+  :root{--brand:#d6336c;--muted:#666;--bg:#fff;}
+  *{box-sizing:border-box}
+  body{font-family:Inter,system-ui,Segoe UI,Arial; margin:0; background:var(--bg);color:#111}
+  header{padding:14px 16px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,#fff 0%, #fff 50%)}
+  .logo{width:44px;height:44px;border-radius:10px;background:var(--brand);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+  .brand{font-size:16px;font-weight:600}
+  main{padding:12px;max-width:980px;margin:0 auto}
+  .grid{display:grid;grid-template-columns:1fr;gap:12px}
+  .card{border:1px solid #eee;border-radius:12px;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,0.04);background:#fff}
+  .imgwrap{position:relative;padding-top:100%;background:#fafafa}
+  .imgwrap img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .card-body{padding:12px}
+  .title-row{display:flex;justify-content:space-between;align-items:center}
+  .design{font-weight:700}
+  .price{color:var(--brand);font-weight:700}
+  .sizes{margin-top:8px}
+  select{width:100%;padding:10px;border-radius:8px;border:1px solid #ddd;font-size:15px}
+  .bookbtn{display:inline-block;width:100%;text-align:center;padding:12px;border-radius:10px;background:var(--brand);color:#fff;font-weight:700;border:none;margin-top:10px;font-size:16px}
+  .meta{font-size:13px;color:var(--muted);margin-top:6px}
+  .video-badge{position:absolute;right:8px;top:8px;background:rgba(255,255,255,0.95);color:#111;padding:6px;border-radius:8px;font-weight:700}
+
+  /* customer box */
+  .customer{position:fixed;right:12px;bottom:12px;background:#fff;border-radius:12px;padding:12px;border:1px solid #eee;box-shadow:0 8px 30px rgba(0,0,0,0.06);width:94%;max-width:420px;z-index:40}
+  .cust-row{display:flex;gap:8px}
+  .cust-row input{flex:1;padding:8px;border-radius:8px;border:1px solid #ddd}
+  .savebtn{background:#0b66ff;color:#fff;padding:8px;border-radius:8px;border:none}
+
+  /* modal */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,0.8);display:none;align-items:center;justify-content:center;padding:12px;z-index:80}
+  .modal.active{display:flex}
+  .modal .box{width:100%;max-width:980px;background:#000;border-radius:12px;overflow:hidden;position:relative}
+  .modal iframe, .modal video{width:100%;height:60vh;border:0;display:block}
+  .close-x{position:absolute;right:8px;top:8px;color:#fff;font-size:22px;background:rgba(0,0,0,0.4);padding:6px;border-radius:6px;z-index:90}
+
+  footer{padding:18px;text-align:center;color:#999;font-size:13px}
+
+  @media(min-width:800px){.grid{grid-template-columns:repeat(2,1fr)} .customer{right:24px;bottom:24px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">PS</div>
+  <div>
+    <div class="brand">Suri's Premium Designing Boutique</div>
+    <div style="font-size:12px;color:var(--muted)">Book your favourite pieces — mobile first</div>
+  </div>
+</header>
+<main>
+  <div id="products" class="grid"></div>
+</main>
+
+<div class="customer" id="customerBox">
+  <div style="font-weight:700;margin-bottom:6px">Your details (saved locally)</div>
+  <div class="cust-row" style="margin-bottom:8px">
+    <input id="custName" placeholder="Name" />
+    <input id="custPhone" placeholder="Mobile (91XXXXXXXXXX)" />
+  </div>
+  <div style="margin-bottom:8px"><input id="custAddress" placeholder="Address (optional)" /></div>
+  <div style="display:flex;gap:8px">
+    <button class="savebtn" id="saveCust">Save</button>
+    <button id="clearCust" style="background:#fff;border:1px solid #ddd;padding:8px;border-radius:8px">Clear</button>
+  </div>
+</div>
+
+<div id="modal" class="modal" onclick="if(event.target.id==='modal') closeModal()">
+  <div class="box" id="videoBox">
+    <div class="close-x" id="closeModal">✕</div>
+    <!-- video iframe/video inserted here -->
+  </div>
+</div>
+
+<footer>Follow us for more updates and exclusive offers: #preetisurisshow on Facebook #preetisurisfashion on Instagram</footer>
+
+<script>
+const WA_NUMBER = '919928377710';
+const SHEET_ID = "1vQ2NbLbqLhidQA7sUuotUIglccxXTbEqnY64o8_qD2ACNFJ19f7QbwmB0xQL6DELAkms-8HGbqjt8mn"; // prefilled based on your published sheet (JSON API)
+const SHEET_NAME = 'Products';
+const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${SHEET_NAME}`;
+
+function driveToDirect(url){
+  if(!url) return url;
+  try{
+    const m = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if(m && m[1]) return `https://drive.google.com/uc?export=view&id=${m[1]}`;
+    const m2 = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if(m2 && m2[1]) return `https://drive.google.com/uc?export=view&id=${m2[1]}`;
+  }catch(e){}
+  return url;
+}
+
+function parseSizes(raw){
+  if(!raw) return [];
+  return raw.toString().split(/[,\s]+/).map(s=>s.trim()).filter(Boolean);
+}
+
+function youtubeIdFromUrl(url){
+  if(!url) return null;
+  const m = url.match(/[?&]v=([a-zA-Z0-9_-]+)/) || url.match(/youtu\.be\/([a-zA-Z0-9_-]+)/) || url.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]+)/);
+  return m?m[1]:null;
+}
+
+async function fetchProducts(){
+  const res = await fetch(SHEET_URL);
+  const txt = await res.text();
+  const json = JSON.parse(txt.substring(txt.indexOf('{'), txt.lastIndexOf('}')+1));
+  const rows = json.table.rows;
+  const cols = json.table.cols.map(c=>c.label);
+  const data = rows.map(r=>{ const obj={}; for(let i=0;i<cols.length;i++){ const key=cols[i]||('col'+i); obj[key]=(r.c[i]&&r.c[i].v)||'';} return obj; });
+  return data;
+}
+
+function makeCard(p){
+  const img = driveToDirect(p['Image Link']||p['Image']||'');
+  const design = p['Design No']||p['Design']||'';
+  const price = p['Price']||'';
+  const sizes = parseSizes(p['Available Sizes']||p['Sizes']||'');
+  const video = p['Video Link']||'';
+
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.innerHTML = `
+    <div class="imgwrap">
+      <img src="${img}" alt="${design}" onerror="this.style.objectFit='contain'">
+      ${video?`<div class="video-badge">VIDEO</div>`:''}
+    </div>
+    <div class="card-body">
+      <div class="title-row"><div class="design">Design ${design}</div><div class="price">₹ ${price}</div></div>
+      <div class="meta">Available Sizes: ${sizes.join(', ')}</div>
+      <div class="sizes"><select aria-label="Select size"><option value="">Select size</option>${sizes.map(s=>`<option value="${s}">${s}</option>`).join('')}</select></div>
+      <button class="bookbtn">Book Now via WhatsApp</button>
+    </div>
+  `;
+
+  const select = div.querySelector('select');
+  const btn = div.querySelector('.bookbtn');
+  if(video){
+    div.querySelector('.imgwrap').addEventListener('click',()=>openVideo(video));
+  }
+  btn.addEventListener('click',()=>{
+    const size = select.value;
+    if(!size){ alert('Please select a size'); return; }
+    sendWhatsApp({design,size,img,price});
+  });
+  return div;
+}
+
+function openVideo(url){
+  const vid = youtubeIdFromUrl(url);
+  const box = document.getElementById('videoBox');
+  box.innerHTML = `<div class="close-x" id="closeModal">✕</div>` + (vid?`<iframe src="https://www.youtube.com/embed/${vid}?autoplay=1" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>`:`<video controls src="${url}"></video>`);
+  document.getElementById('modal').classList.add('active');
+  document.getElementById('closeModal').addEventListener('click',closeModal);
+}
+
+function closeModal(){ document.getElementById('modal').classList.remove('active'); document.getElementById('videoBox').innerHTML=''; }
+
+function sendWhatsApp({design,size,img,price}){
+  const name = localStorage.getItem('cust_name')||'';
+  const phone = localStorage.getItem('cust_phone')||'';
+  const address = localStorage.getItem('cust_address')||'';
+  let msg = `Hello, I want to book this item:%0A%0ADesign No.: ${encodeURIComponent(design)}%0ASize: ${encodeURIComponent(size)}%0APrice: ${encodeURIComponent(price)}%0A`;
+  if(name) msg += `%0AName: ${encodeURIComponent(name)}`;
+  if(phone) msg += `%0APhone: ${encodeURIComponent(phone)}`;
+  if(address) msg += `%0AAddress: ${encodeURIComponent(address)}`;
+  msg += `%0A%0AImage: ${encodeURIComponent(img)}`;
+  const wa = `https://wa.me/${WA_NUMBER}?text=${msg}`;
+  window.location.href = wa;
+}
+
+document.getElementById('saveCust').addEventListener('click',()=>{
+  const name = document.getElementById('custName').value.trim();
+  const phone = document.getElementById('custPhone').value.trim();
+  const address = document.getElementById('custAddress').value.trim();
+  if(!name || !phone){ alert('Please enter name and mobile number'); return; }
+  localStorage.setItem('cust_name', name);
+  localStorage.setItem('cust_phone', phone);
+  localStorage.setItem('cust_address', address);
+  alert('Saved locally — will be prefilled next time');
+});
+
+document.getElementById('clearCust').addEventListener('click',()=>{
+  localStorage.removeItem('cust_name');
+  localStorage.removeItem('cust_phone');
+  localStorage.removeItem('cust_address');
+  document.getElementById('custName').value='';document.getElementById('custPhone').value='';document.getElementById('custAddress').value='';
+});
+
+function prefill(){ document.getElementById('custName').value = localStorage.getItem('cust_name')||''; document.getElementById('custPhone').value = localStorage.getItem('cust_phone')||''; document.getElementById('custAddress').value = localStorage.getItem('cust_address')||''; }
+
+async function init(){ prefill(); try{ const data = await fetchProducts(); const sorted = data.sort((a,b)=> (parseFloat(a.Position||0)||0) - (parseFloat(b.Position||0)||0)); const container = document.getElementById('products'); container.innerHTML=''; sorted.forEach(p=> container.appendChild(makeCard(p))); }catch(e){ document.getElementById('products').innerHTML = `<div style="padding:12px;color:#b00">Error loading products. Make sure sheet is shared publicly and sheet name is Products.<br><small>${e}</small></div>`;} }
+
+init();
+
+</script>
+</body>
+</html>
