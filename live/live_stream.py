@@ -19,8 +19,8 @@ Run it on a machine that stays on while streaming (your laptop with sleep turned
   1. Install Python 3 and ffmpeg.
   2. Set the keys (Mac/Linux: export NAME='value'   Windows: set NAME=value):
        ADMIN_PASSWORD  your admin password (same one you use on the admin panel)
-       FB_KEY          rtmps://live-api-s.facebook.com:443/rtmp/<your Facebook stream key>
-       IG_KEY          the Instagram Live Producer "Stream URL" + "/" + "Stream key"
+       FB_KEY          your Facebook stream key (FB-...)
+       IG_URL, IG_KEY  the Instagram "Stream URL" and "Stream key"
   3. python3 live_stream.py              (Windows: py live_stream.py)
   4. Click "Go live" in Facebook Live Producer and Instagram once the preview shows the video.
 
@@ -223,7 +223,20 @@ def main():
     password = os.environ.get("ADMIN_PASSWORD", "")
     if not password and not a.mock:
         sys.exit("Set ADMIN_PASSWORD first (the admin panel password).")
-    targets = [k for k in (os.environ.get("FB_KEY"), os.environ.get("IG_KEY")) if k]
+    targets = []
+    fb = os.environ.get("FB_KEY", "").strip()
+    if fb:   # a bare Facebook key is fine: add Facebook's server address in front
+        targets.append(fb if fb.startswith("rtmp") else "rtmps://live-api-s.facebook.com:443/rtmp/" + fb)
+    ig = os.environ.get("IG_KEY", "").strip()
+    if ig:
+        if not ig.startswith("rtmp"):
+            ig_url = os.environ.get("IG_URL", "").strip()
+            if not ig_url.startswith("rtmp"):
+                sys.exit('Instagram needs its Stream URL too. Copy "Stream URL" from the Instagram Live page and run:\n'
+                         '  $env:IG_URL="rtmps://...the Stream URL..."\n'
+                         'Or remove Instagram for now with:  $env:IG_KEY=""')
+            ig = ig_url.rstrip("/") + "/" + ig
+        targets.append(ig)
     if not a.dry_run and not targets:
         sys.exit("Set FB_KEY and/or IG_KEY (full rtmps://... address including the stream key).")
     os.makedirs(a.work, exist_ok=True)
