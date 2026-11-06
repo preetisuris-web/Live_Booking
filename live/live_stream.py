@@ -131,24 +131,26 @@ def download(url, dest):
         return None
 
 
-def esc(t):
-    return t.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\u2019").replace("%", "\\%")
-
-
 def make_clip(p, work, font, per_photo, max_photos, max_reel):
     """Slideshow of the design's photos, same encoding for every clip so they join without gaps."""
     key = re.sub(r"[^A-Za-z0-9_-]", "_", p["design"])
     out = os.path.join(work, f"clip_{key}.mp4")
-    if os.path.exists(out):
+    if os.path.exists(out) and os.path.getsize(out) > 10000:
         return out
     label = f"Design {p['design']}" + (f"   Rs {p['price']}" if p["price"] else "")
     sizes = f"Sizes: {p['sizes']}"
     fit = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={FPS},format=yuv420p")
+    # Labels go in small text files next to a copy of the font, and ffmpeg runs inside the work
+    # folder, so the filter only ever sees plain names (no "C:" or ":" for Windows to trip on).
+    with open(os.path.join(work, f"t1_{key}.txt"), "w", encoding="utf-8") as f:
+        f.write(label)
+    with open(os.path.join(work, f"t2_{key}.txt"), "w", encoding="utf-8") as f:
+        f.write(sizes)
     text = (f"drawbox=x=0:y=ih-230:w=iw:h=230:color=black@0.6:t=fill,"
-            f"drawtext=fontfile='{font}':text='{esc(label)}':fontcolor=white:fontsize=52:"
+            f"drawtext=fontfile=font.ttf:textfile=t1_{key}.txt:fontcolor=white:fontsize=52:"
             f"x=(w-text_w)/2:y=h-200,"
-            f"drawtext=fontfile='{font}':text='{esc(sizes)}':fontcolor=white:fontsize=38:"
+            f"drawtext=fontfile=font.ttf:textfile=t2_{key}.txt:fontcolor=white:fontsize=38:"
             f"x=(w-text_w)/2:y=h-120")
     enc = ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "2500k", "-maxrate", "2500k",
            "-bufsize", "5000k", "-g", str(FPS * 2), "-keyint_min", str(FPS * 2), "-sc_threshold", "0",
@@ -165,7 +167,7 @@ def make_clip(p, work, font, per_photo, max_photos, max_reel):
                 cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
             cmd += ["-t", str(max_reel), "-vf", fit + "," + text, "-map", "0:v:0",
                     "-map", "0:a:0" if has_audio else "1:a:0", "-shortest"] + enc + [out]
-            if subprocess.run(cmd).returncode == 0:
+            if subprocess.run(cmd, cwd=work).returncode == 0:
                 return out
             log(f"   reel for {p['design']} unusable, using photos")
 
@@ -185,7 +187,7 @@ def make_clip(p, work, font, per_photo, max_photos, max_reel):
     chain = ";".join(f"[{i}:v]{fit}[v{i}]" for i in range(len(imgs)))
     chain += ";" + "".join(f"[v{i}]" for i in range(len(imgs))) + f"concat=n={len(imgs)}:v=1:a=0,{text}[v]"
     cmd += ["-filter_complex", chain, "-map", "[v]", "-map", f"{len(imgs)}:a"] + enc + [out]
-    if subprocess.run(cmd).returncode != 0:
+    if subprocess.run(cmd, cwd=work).returncode != 0:
         log(f"   skipping {p['design']}: ffmpeg could not make the clip")
         return None
     return out
@@ -240,6 +242,7 @@ def main():
     if not a.dry_run and not targets:
         sys.exit("Set FB_KEY and/or IG_KEY (full rtmps://... address including the stream key).")
     os.makedirs(a.work, exist_ok=True)
+    shutil.copyfile(font, os.path.join(a.work, "font.ttf"))
 
     designs = load_designs(password, a.mock)
     if not designs:
