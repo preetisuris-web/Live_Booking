@@ -138,7 +138,7 @@ function makeProductCard(p){
       <div class="sizes">
         <select aria-label="Select size">
           <option value="">Select size</option>
-          ${'${sizesOptions}'}
+          ${sizes.map(sz=>`<option value="${sz}">${sz}</option>`).join('')}
         </select>
       </div>
       <button class="bookbtn">Book Now via WhatsApp</button>
@@ -220,12 +220,8 @@ async function init(){
     const container = document.getElementById('products');
     container.innerHTML = '';
     for(const p of sorted){
-      // build sizes options
-      let sizesOptions = '';
-      const sizes = (p['Available Sizes']||p['Sizes']||'').toString().split(/[,\s]+/).map(s=>s.trim()).filter(Boolean);
-      for(const s of sizes){ sizesOptions += `<option value="${s}">${s}</option>`; }
-      const card = makeProductCard(p).outerHTML.replace('${sizesOptions}', sizesOptions);
-      container.insertAdjacentHTML('beforeend', card);
+      // append the element itself so the Book / video click handlers stay attached
+      container.appendChild(makeProductCard(p));
     }
     document.getElementById('loading').style.display = 'none';
     document.getElementById('products').style.display = 'grid';
