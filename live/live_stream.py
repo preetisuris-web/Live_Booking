@@ -1,155 +1,194 @@
 #!/usr/bin/env python3
 """
-3-hour looping Facebook + Instagram live stream of your designs.
+3-hour looping Facebook + Instagram live stream of your designs, straight from the desk.
 
 Order of the stream (each block = 20 designs):
   latest 20 -> top-stock 1-20 -> latest 20 -> top-stock 21-40 -> latest 20 -> top-stock 41-60 ...
-until the total length reaches --hours (default 3). When the stock list runs out
-it starts again from the highest-stock designs.
+until the total length reaches --hours (default 3). When the stock list runs out it starts
+again from the highest-stock designs.
 
-Each design becomes one clip: its video (Video Link) if it can be downloaded,
-otherwise its photo (Image Link) shown for a few seconds. Design No and price
-are printed on every clip.
+Designs and stock come from the same database the desk / store use (sale.meraboutique.in desk,
+meraboutique admin): "latest" = most recently added designs, "stock" = total pieces left
+across all sizes and locations. Only designs that are visible and have stock are shown.
 
-Run this on a machine that stays on (your Hetzner server), NOT your laptop:
-  sudo apt-get install -y ffmpeg fonts-dejavu-core python3
-  pip3 install yt-dlp            # only needed if Video Links are YouTube
-  export FB_KEY='rtmps://live-api-s.facebook.com:443/rtmp/FB-xxxx'
-  export IG_KEY='rtmps://edgetee-upload-xxx.xx.fbcdn.net:443/rtmp/xxxx'
-  nohup python3 live_stream.py > live.log 2>&1 &
+Each design plays its reel exactly as on deals.meraboutique.in/?tab=reels (same video files,
+from sale.meraboutique.in/api/media/clips). Designs with no reel get a slideshow of their photos.
+Design No, price and the sizes still in stock are printed at the bottom of every clip.
 
-Then you can switch your laptop off. Watch progress with:  tail -f live.log
-Stop early with:  pkill -f live_stream.py; pkill ffmpeg
+Run it on a machine that stays on while streaming (your laptop with sleep turned off, or your server):
+  1. Install Python 3 and ffmpeg.
+  2. Set the keys (Mac/Linux: export NAME='value'   Windows: set NAME=value):
+       ADMIN_PASSWORD  your admin password (same one you use on the admin panel)
+       FB_KEY          rtmps://live-api-s.facebook.com:443/rtmp/<your Facebook stream key>
+       IG_KEY          the Instagram Live Producer "Stream URL" + "/" + "Stream key"
+  3. python3 live_stream.py              (Windows: py live_stream.py)
+  4. Click "Go live" in Facebook Live Producer and Instagram once the preview shows the video.
 
-Test without going live:  python3 live_stream.py --dry-run
-  (writes the first few minutes to preview.mp4 so you can check it)
+Check without going live:  python3 live_stream.py --dry-run   (writes preview.mp4, ~3 minutes)
+Stop early: press Ctrl+C in that window.
 """
-import argparse, csv, io, os, re, shutil, subprocess, sys, urllib.request
+import argparse, json, os, re, shutil, subprocess, sys, urllib.request
 
-SHEET_ID = "1wcR2TDqy24SALIkHTnwXpLe0RHKeu2EXZoPyraZBtdM"   # same sheet as index.html
-SHEET_NAME = "Products"
+SUPABASE_URL = "https://aqadiwwtahegfevslygc.supabase.co"
+CLIPS_URL = "https://sale.meraboutique.in/api/media/clips"   # same list the Reels tab uses
 W, H, FPS = 720, 1280, 30          # vertical 9:16, accepted by both Instagram and Facebook
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+SIZE_LETTERS = {"36": "S", "38": "M", "40": "L", "42": "XL", "44": "XXL", "46": "3XL", "48": "4XL", "50": "5XL"}
 
 
 def log(*a):
     print(*a, flush=True)
 
 
-# ---------- reading the sheet ----------
-def load_rows(csv_path=None):
-    if csv_path:
-        text = open(csv_path, encoding="utf-8").read()
+def find_font():
+    for f in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+              "/Library/Fonts/Arial Bold.ttf",
+              "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+              "C:/Windows/Fonts/arialbd.ttf"):
+        if os.path.exists(f):
+            return f
+    sys.exit("No font found for the design labels. Linux: sudo apt-get install -y fonts-dejavu-core")
+
+
+# ---------- reading designs + stock from the desk database ----------
+def load_designs(password, mock=None):
+    if mock:
+        data = json.load(open(mock, encoding="utf-8"))
     else:
-        url = (f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
-               f"?tqx=out:csv&sheet={SHEET_NAME}")
-        text = urllib.request.urlopen(url, timeout=60).read().decode("utf-8")
-    rows = list(csv.DictReader(io.StringIO(text)))
-    return [{(k or "").strip(): (v or "").strip() for k, v in r.items()} for r in rows]
+        req = urllib.request.Request(
+            f"{SUPABASE_URL}/functions/v1/inventory-api",
+            data=json.dumps({"action": "stock_overview", "admin_password": password}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            body = json.load(urllib.request.urlopen(req, timeout=60))
+        except urllib.error.HTTPError as e:
+            sys.exit(f"Desk refused the request ({e.code}). Check ADMIN_PASSWORD. {e.read()[:200]!r}")
+        if body.get("error"):
+            sys.exit("Desk error: " + str(body["error"]))
+        data = body["data"]
+
+    stock = {}       # product_id -> {size: qty}
+    for r in data["inventory"]:
+        q = int(r.get("stock_count") or 0)
+        if q > 0:
+            stock.setdefault(r["product_id"], {})[r["size"]] = q
+    designs = []
+    for p in data["products"]:
+        if not p.get("design_no") or not p.get("image"):
+            continue
+        if p.get("is_visible") is False or (p.get("status") or "active") not in ("active", "published", ""):
+            continue
+        sizes = stock.get(p["id"], {})
+        total = sum(sizes.values())
+        if total <= 0:
+            continue
+        price = p.get("sale_price") or p.get("price") or ""
+        designs.append({
+            "design": str(p["design_no"]),
+            "price": f"{float(price):g}" if price != "" else "",
+            "sizes": ", ".join(SIZE_LETTERS.get(s, s) for s in sorted(sizes, key=lambda s: (len(s), s))),
+            "images": [p["image"]] + [i for i in (p.get("images") or []) if i and i != p["image"]],
+            "created": p.get("created_at") or "",
+            "stock": total,
+        })
+    return designs
 
 
-def find_col(rows, *needles):
-    if not rows:
-        return None
-    for col in rows[0].keys():
-        low = col.lower()
-        if any(n in low for n in needles):
-            return col
+# ---------- reels ----------
+def load_reels(mock=None):
+    try:
+        j = json.load(open(mock)) if mock else json.load(urllib.request.urlopen(CLIPS_URL, timeout=60))
+        return {k.upper(): v for k, v in (j.get("clips") or {}).items()}
+    except Exception as e:
+        log("Could not load the reels list, using photos only:", e)
+        return {}
+
+
+def reel_for(reels, design):
+    """Same matching as the Reels tab (tolerates the hyphen in codes like 2152-B)."""
+    up = design.upper()
+    if up in reels:
+        return reels[up]
+    m = re.match(r"^([A-Z]*)-?(\d.*)$", up)
+    if m:
+        for c in (f"{m.group(1)}-{m.group(2)}", f"{m.group(1)}{m.group(2)}"):
+            if c in reels:
+                return reels[c]
     return None
 
 
-def number(s):
-    m = re.search(r"-?\d+(\.\d+)?", s or "")
-    return float(m.group()) if m else 0.0
-
-
-def total_stock(s):
-    """'5' -> 5 ; 'S:2, M:3, L:1' -> 6 ; '' -> 0"""
-    nums = re.findall(r"\d+(?:\.\d+)?", s or "")
-    if not nums:
-        return 0.0
-    # 'S:2 M:3' style -> sum ; plain number -> that number
-    return sum(float(n) for n in nums) if re.search(r"[:=]", s) else float(nums[0])
-
-
 # ---------- making clips ----------
-def drive_id(url):
-    m = re.search(r"/d/([A-Za-z0-9_-]+)", url) or re.search(r"[?&]id=([A-Za-z0-9_-]+)", url)
-    return m.group(1) if m else None
-
-
 def download(url, dest):
-    if not url:
-        return None
     try:
-        if "youtu" in url:
-            if not shutil.which("yt-dlp"):
-                return None
-            subprocess.run(["yt-dlp", "-q", "-f", "mp4/best", "-o", dest, url],
-                           check=True, timeout=300)
-            return dest if os.path.exists(dest) else None
-        did = drive_id(url) if "drive.google" in url else None
-        if did:
-            url = f"https://drive.usercontent.google.com/download?id={did}&export=download&confirm=t"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
             shutil.copyfileobj(r, f)
-        # Drive sometimes returns an HTML warning page instead of the file
         with open(dest, "rb") as f:
             if f.read(15).lower().startswith((b"<!doctype", b"<html")):
                 return None
         return dest
     except Exception as e:
-        log("   download failed:", url[:80], e)
+        log("   photo download failed:", url[:80], e)
         return None
 
 
 def esc(t):
-    return t.replace("\\", "\\\\").replace(":", "\\:").replace("'", "’").replace("%", "\\%")
+    return t.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\u2019").replace("%", "\\%")
 
 
-def make_clip(p, work, max_video_sec, photo_sec):
-    """Returns path of a normalised clip (same codec settings for every clip)."""
-    key = re.sub(r"[^A-Za-z0-9_-]", "_", p["design"] or "x")
+def make_clip(p, work, font, per_photo, max_photos, max_reel):
+    """Slideshow of the design's photos, same encoding for every clip so they join without gaps."""
+    key = re.sub(r"[^A-Za-z0-9_-]", "_", p["design"])
     out = os.path.join(work, f"clip_{key}.mp4")
     if os.path.exists(out):
         return out
     label = f"Design {p['design']}" + (f"   Rs {p['price']}" if p["price"] else "")
-    sizes = f"Sizes {p['sizes']}" if p["sizes"] else ""
-    text = (f"drawbox=x=0:y=ih-230:w=iw:h=230:color=black@0.55:t=fill,"
-            f"drawtext=fontfile={FONT}:text='{esc(label)}':fontcolor=white:fontsize=52:"
-            f"x=(w-text_w)/2:y=h-200")
-    if sizes:
-        text += (f",drawtext=fontfile={FONT}:text='{esc(sizes)}':fontcolor=white:"
-                 f"fontsize=38:x=(w-text_w)/2:y=h-120")
+    sizes = f"Sizes: {p['sizes']}"
     fit = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={FPS},format=yuv420p")
+    text = (f"drawbox=x=0:y=ih-230:w=iw:h=230:color=black@0.6:t=fill,"
+            f"drawtext=fontfile='{font}':text='{esc(label)}':fontcolor=white:fontsize=52:"
+            f"x=(w-text_w)/2:y=h-200,"
+            f"drawtext=fontfile='{font}':text='{esc(sizes)}':fontcolor=white:fontsize=38:"
+            f"x=(w-text_w)/2:y=h-120")
     enc = ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "2500k", "-maxrate", "2500k",
-           "-bufsize", "5000k", "-g", str(FPS * 2), "-keyint_min", str(FPS * 2),
-           "-sc_threshold", "0", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
+           "-bufsize", "5000k", "-g", str(FPS * 2), "-keyint_min", str(FPS * 2), "-sc_threshold", "0",
+           "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
 
-    src = download(p["video"], os.path.join(work, f"src_{key}.vid"))
-    if src:
-        has_audio = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
-             "stream=index", "-of", "csv=p=0", src], capture_output=True, text=True).stdout.strip()
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", src]
-        if not has_audio:
-            cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
-        cmd += ["-t", str(max_video_sec), "-vf", fit + "," + text, "-map", "0:v:0",
-                "-map", "0:a:0" if has_audio else "1:a:0", "-shortest"] + enc + [out]
-        if subprocess.run(cmd).returncode == 0:
-            return out
-        log("   video unusable, falling back to photo")
+    if p.get("reel"):
+        src = download(p["reel"], os.path.join(work, f"reel_{key}.mp4"))
+        if src:
+            has_audio = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                 "-of", "csv=p=0", src], capture_output=True, text=True).stdout.strip()
+            cmd = ["ffmpeg", "-y", "-v", "error", "-i", src]
+            if not has_audio:
+                cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+            cmd += ["-t", str(max_reel), "-vf", fit + "," + text, "-map", "0:v:0",
+                    "-map", "0:a:0" if has_audio else "1:a:0", "-shortest"] + enc + [out]
+            if subprocess.run(cmd).returncode == 0:
+                return out
+            log(f"   reel for {p['design']} unusable, using photos")
 
-    img = download(p["image"], os.path.join(work, f"img_{key}.jpg"))
-    if not img:
-        log(f"   skipping design {p['design']}: no usable video or photo")
+    imgs = []
+    for i, url in enumerate(p["images"][:max_photos]):
+        f = download(url, os.path.join(work, f"img_{key}_{i}"))
+        if f:
+            imgs.append(f)
+    if not imgs:
+        log(f"   skipping {p['design']}: no photo could be downloaded")
         return None
-    cmd = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-i", img,
-           "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-           "-t", str(photo_sec), "-vf", fit + "," + text, "-map", "0:v", "-map", "1:a"] + enc + [out]
-    return out if subprocess.run(cmd).returncode == 0 else None
+
+    cmd = ["ffmpeg", "-y", "-v", "error"]
+    for f in imgs:
+        cmd += ["-loop", "1", "-t", str(per_photo), "-i", f]
+    cmd += ["-f", "lavfi", "-t", str(per_photo * len(imgs)), "-i", "anullsrc=r=44100:cl=stereo"]
+    chain = ";".join(f"[{i}:v]{fit}[v{i}]" for i in range(len(imgs)))
+    chain += ";" + "".join(f"[v{i}]" for i in range(len(imgs))) + f"concat=n={len(imgs)}:v=1:a=0,{text}[v]"
+    cmd += ["-filter_complex", chain, "-map", "[v]", "-map", f"{len(imgs)}:a"] + enc + [out]
+    if subprocess.run(cmd).returncode != 0:
+        log(f"   skipping {p['design']}: ffmpeg could not make the clip")
+        return None
+    return out
 
 
 def duration(path):
@@ -166,106 +205,94 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=3)
     ap.add_argument("--block", type=int, default=20, help="designs per block")
-    ap.add_argument("--csv", help="use a local CSV export instead of the Google Sheet")
-    ap.add_argument("--stock-col", help="name of the stock column (auto-detected if omitted)")
-    ap.add_argument("--latest-by", default="design",
-                    help="'design' = highest Design No is latest; 'position' = lowest Position "
-                         "is latest; or any other column name (highest value = latest)")
-    ap.add_argument("--max-video-sec", type=int, default=20)
-    ap.add_argument("--photo-sec", type=int, default=8)
-    ap.add_argument("--work", default=os.path.expanduser("~/live_work"))
+    ap.add_argument("--per-photo", type=int, default=3, help="seconds per photo")
+    ap.add_argument("--max-photos", type=int, default=4, help="photos per design")
+    ap.add_argument("--max-reel-sec", type=int, default=60, help="cut reels longer than this")
+    ap.add_argument("--photos-only", action="store_true", help="ignore reels, use photo slideshows")
+    ap.add_argument("--mock-clips", help=argparse.SUPPRESS)
+    ap.add_argument("--work", default=os.path.join(os.path.expanduser("~"), "live_work"))
+    ap.add_argument("--mock", help=argparse.SUPPRESS)   # local JSON instead of the desk (testing)
     ap.add_argument("--dry-run", action="store_true",
-                    help="no streaming; write first 3 minutes to preview.mp4")
+                    help="no streaming; write the first ~3 minutes to preview.mp4")
     a = ap.parse_args()
 
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
-            sys.exit(f"{tool} not installed: sudo apt-get install -y ffmpeg")
-    if not os.path.exists(FONT):
-        sys.exit("font missing: sudo apt-get install -y fonts-dejavu-core")
+            sys.exit(f"{tool} is not installed (it comes with ffmpeg).")
+    font = find_font()
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    if not password and not a.mock:
+        sys.exit("Set ADMIN_PASSWORD first (the admin panel password).")
     targets = [k for k in (os.environ.get("FB_KEY"), os.environ.get("IG_KEY")) if k]
     if not a.dry_run and not targets:
-        sys.exit("Set FB_KEY and/or IG_KEY (full rtmps://... URL including the stream key)")
+        sys.exit("Set FB_KEY and/or IG_KEY (full rtmps://... address including the stream key).")
     os.makedirs(a.work, exist_ok=True)
 
-    rows = load_rows(a.csv)
-    log(f"Loaded {len(rows)} rows from sheet")
-    stock_col = a.stock_col or find_col(rows, "stock", "qty", "quantity", "pcs", "pieces")
-    if not stock_col:
-        sys.exit("No stock column found in the sheet. Pass --stock-col 'Your Column Name'. "
-                 f"Columns are: {list(rows[0].keys()) if rows else []}")
-    log(f"Stock column: {stock_col!r}   latest by: {a.latest_by!r}")
-
-    designs = []
-    for r in rows:
-        d = {"design": r.get("Design No") or r.get("Design") or "",
-             "price": r.get("Price") or r.get("MRP") or "",
-             "sizes": r.get("Available Sizes") or r.get("Sizes") or "",
-             "image": r.get("Image Link") or r.get("Image") or "",
-             "video": r.get("Video Link") or "",
-             "position": number(r.get("Position", "")),
-             "stock": total_stock(r.get(stock_col, "")),
-             "row": r}
-        if d["design"] and (d["image"] or d["video"]):
-            designs.append(d)
+    designs = load_designs(password, a.mock)
     if not designs:
-        sys.exit("No designs with a Design No and a photo/video link")
+        sys.exit("No visible designs with stock found.")
+    reels = {} if a.photos_only else load_reels(a.mock_clips)
+    for d in designs:
+        d["reel"] = reel_for(reels, d["design"])
+    log(f"{len(designs)} designs in stock, {sum(1 for d in designs if d['reel'])} with a reel")
 
-    if a.latest_by == "design":
-        latest = sorted(designs, key=lambda d: number(d["design"]), reverse=True)
-    elif a.latest_by == "position":
-        latest = sorted(designs, key=lambda d: d["position"])
-    else:
-        latest = sorted(designs, key=lambda d: number(d["row"].get(a.latest_by, "")), reverse=True)
-    latest = latest[:a.block]
-    by_stock = [d for d in sorted(designs, key=lambda d: d["stock"], reverse=True) if d["stock"] > 0]
-    stock_blocks = [by_stock[i:i + a.block] for i in range(0, len(by_stock), a.block)] or [[]]
+    latest = sorted(designs, key=lambda d: d["created"], reverse=True)[:a.block]
+    by_stock = sorted(designs, key=lambda d: d["stock"], reverse=True)
+    stock_blocks = [by_stock[i:i + a.block] for i in range(0, len(by_stock), a.block)]
+    log("Latest:", ", ".join(d["design"] for d in latest))
+    for i, b in enumerate(stock_blocks[:5], 1):
+        log(f"Stock block {i}:", ", ".join(f"{d['design']}({d['stock']})" for d in b))
 
-    log("Latest 20:", ", ".join(d["design"] for d in latest))
-    for i, b in enumerate(stock_blocks, 1):
-        log(f"Stock block {i}:", ", ".join(f"{d['design']}({d['stock']:g})" for d in b))
-
-    log("Preparing clips (one-time, cached in", a.work, ")...")
+    # how many stock blocks fit in the time, so we only prepare clips we will use
+    est = 12 * a.block            # rough seconds per block
+    blocks_needed = int(a.hours * 3600 / est) + 2 if not a.dry_run else 2
+    use = {d["design"]: d for d in latest}
+    for b in stock_blocks[:blocks_needed // 2 + 1]:
+        use.update({d["design"]: d for d in b})
+    log(f"Preparing {len(use)} clips (cached in {a.work})...")
     clip = {}
-    for d in {d["design"]: d for d in latest + by_stock}.values():
-        log(" -", d["design"])
-        c = make_clip(d, a.work, a.max_video_sec, a.photo_sec)
+    for n, d in enumerate(use.values(), 1):
+        log(f" {n}/{len(use)}  {d['design']}")
+        c = make_clip(d, a.work, font, a.per_photo, a.max_photos, a.max_reel_sec)
         if c:
             clip[d["design"]] = (c, duration(c))
 
-    # build the running order until we reach the target length
     target = a.hours * 3600 if not a.dry_run else 180
     order, total, n = [], 0.0, 0
     while total < target:
         block = latest if n % 2 == 0 else stock_blocks[(n // 2) % len(stock_blocks)]
-        added = False
         for d in block:
             if d["design"] in clip and total < target:
                 order.append(clip[d["design"]][0])
                 total += clip[d["design"]][1]
-                added = True
-        if not added and n > 2:
-            sys.exit("No clips could be made; check the photo/video links are public")
         n += 1
+        if n > 4 and not order:
+            sys.exit("No clips could be made; check the photos open in a browser.")
     playlist = os.path.join(a.work, "playlist.txt")
-    with open(playlist, "w") as f:
+    with open(playlist, "w", encoding="utf-8") as f:
         for c in order:
-            f.write(f"file '{c}'\n")
+            f.write("file '" + c.replace("\\", "/").replace("'", "'\\''") + "'\n")
     log(f"Running order: {len(order)} clips, {total / 60:.0f} minutes, {n} blocks")
 
-    base = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-stats", "-re",
-            "-f", "concat", "-safe", "0", "-i", playlist, "-map", "0:v", "-map", "0:a",
-            "-c", "copy"]
     if a.dry_run:
         out = os.path.join(os.getcwd(), "preview.mp4")
         subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
                         "-i", playlist, "-c", "copy", out], check=True)
         log("Dry run done ->", out)
         return
-    tee = "|".join(f"[f=flv:onfail=ignore]{t}" for t in targets)
-    log(f"GOING LIVE to {len(targets)} destination(s) for {total / 3600:.2f} h")
-    rc = subprocess.run(base + ["-f", "tee", tee]).returncode
-    log("Stream ended, ffmpeg exit code", rc)
+    # one independent sender per platform: if Instagram drops, Facebook keeps going (and vice versa)
+    log(f"GOING LIVE to {len(targets)} destination(s) for {total / 3600:.2f} hours")
+    procs = [subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "warning", "-re",
+                               "-f", "concat", "-safe", "0", "-i", playlist,
+                               "-map", "0:v", "-map", "0:a", "-c", "copy", "-f", "flv", t])
+             for t in targets]
+    try:
+        codes = [p.wait() for p in procs]
+    except KeyboardInterrupt:
+        for p in procs:
+            p.terminate()
+        codes = [p.wait() for p in procs]
+    log("Stream ended, exit codes", codes)
 
 
 if __name__ == "__main__":
